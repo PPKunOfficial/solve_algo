@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "调试当前 LeetCode Rust 题目",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--manifest-path",
+                    "${workspaceFolder}/leetcode/rust/Cargo.toml",
+                    "--bin",
+                    "${fileBasenameNoExtension}"
+                ],
+                "filter": {
+                    "name": "${fileBasenameNoExtension}",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}/leetcode/rust",
+            "sourceLanguages": [
+                "rust"
+            ]
+        }
+    ]
+}
