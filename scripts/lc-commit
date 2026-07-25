@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Commit one LeetCode solution using metadata from its generated header."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+META_RE = re.compile(r"@lc\s+app=\S+\s+id=(\d+)\s+lang=([^\s*]+)")
+TITLE_RE = re.compile(r"\[(\d+)]\s+(.+?)\s*(?:\*/)?$", re.MULTILINE)
+
+
+class CommitError(Exception):
+    """An expected, user-actionable CLI error."""
+
+
+def run_git(*args: str, cwd: Path, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+
+
+def repository_root(cwd: Path) -> Path:
+    try:
+        result = run_git("rev-parse", "--show-toplevel", cwd=cwd, capture=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise CommitError("当前目录不在 Git 仓库中，或系统未安装 Git") from error
+    return Path(result.stdout.strip()).resolve()
+
+
+def commit_message(path: Path) -> str:
+    try:
+        header = "\n".join(path.read_text(encoding="utf-8").splitlines()[:64])
+    except (OSError, UnicodeError) as error:
+        raise CommitError(f"无法读取 UTF-8 文件：{path}") from error
+
+    metadata = META_RE.search(header)
+    titles = TITLE_RE.findall(header)
+    if metadata is None:
+        raise CommitError(f"文件头缺少 @lc app=... id=... lang=...：{path}")
+
+    problem_id, language = metadata.groups()
+    title = next((text.strip() for title_id, text in titles if title_id == problem_id), None)
+    if title is None:
+        raise CommitError(f"文件头缺少 [{problem_id}] 题目标题：{path}")
+
+    return f"[{problem_id}] {title} {language}"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="读取 LeetCode 文件头，暂存该文件并生成 Git commit",
+    )
+    parser.add_argument("file", type=Path, help="要提交的 LeetCode 题解文件")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只显示 commit message，不修改 Git 仓库",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        root = repository_root(Path.cwd())
+        path = args.file.expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        else:
+            path = path.resolve()
+
+        try:
+            relative_path = path.relative_to(root)
+        except ValueError as error:
+            raise CommitError(f"文件不在当前 Git 仓库中：{path}") from error
+        if not path.is_file():
+            raise CommitError(f"文件不存在：{path}")
+
+        message = commit_message(path)
+        if args.dry_run:
+            print(message)
+            return 0
+
+        run_git("add", "--", str(relative_path), cwd=root)
+        run_git(
+            "commit",
+            "--only",
+            "-m",
+            message,
+            "--",
+            str(relative_path),
+            cwd=root,
+        )
+        return 0
+    except CommitError as error:
+        print(f"lc-commit: {error}", file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError as error:
+        print(f"lc-commit: Git 命令失败（退出码 {error.returncode}）", file=sys.stderr)
+        return error.returncode or 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

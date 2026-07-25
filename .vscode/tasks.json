@@ -1,0 +1,42 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "提交当前 LeetCode 题解",
+            "type": "process",
+            "command": "${workspaceFolder}/scripts/lc-commit",
+            "args": [
+                "${file}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "预览当前 LeetCode commit message",
+            "type": "process",
+            "command": "${workspaceFolder}/scripts/lc-commit",
+            "args": [
+                "--dry-run",
+                "${file}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
+        }
+    ]
+}
