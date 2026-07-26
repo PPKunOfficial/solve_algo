@@ -23,6 +23,18 @@
             "sourceLanguages": [
                 "rust"
             ]
+        },
+        {
+            "name": "调试当前洛谷 C++ 题目",
+            "type": "lldb",
+            "request": "launch",
+            "preLaunchTask": "编译当前洛谷 C++ 题目",
+            "program": "${fileDirname}/.build/${fileBasenameNoExtension}",
+            "args": [],
+            "cwd": "${fileDirname}",
+            "sourceLanguages": [
+                "cpp"
+            ]
         }
     ]
 }

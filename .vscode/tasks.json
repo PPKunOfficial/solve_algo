@@ -37,6 +37,21 @@
                 "clear": true,
                 "showReuseMessage": false
             }
+        },
+        {
+            "label": "编译当前洛谷 C++ 题目",
+            "type": "shell",
+            "command": "case \"${file}\" in \"${workspaceFolder}/luogu/\"*) mkdir -p \"${fileDirname}/.build\" && clang++ -std=c++20 -Wall -Wextra -Wpedantic -g -O0 \"${file}\" -o \"${fileDirname}/.build/${fileBasenameNoExtension}\" ;; *) echo \"当前文件不在 luogu 目录中\" >&2; exit 1 ;; esac",
+            "options": {
+                "cwd": "${workspaceFolder}/luogu"
+            },
+            "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
         }
     ]
 }

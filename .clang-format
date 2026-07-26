@@ -1,0 +1,8 @@
+# 工作区内所有 C++ 题解共用的格式规则
+BasedOnStyle: Google
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
