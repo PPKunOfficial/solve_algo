@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { stdin, stdout } from "process";
 /**
  * lg-judge — local judge + Luogu API client for solve_q.
  *
@@ -249,17 +250,22 @@ async function submitWithCaptcha(
       const captchaPath = `/tmp/luogu-captcha-${Date.now()}.png`;
       writeFileSync(captchaPath, captchaImg);
 
-      // Try to display in terminal using chafa or imgcat
-      const viewers = [["chafa", captchaPath], ["imgcat", captchaPath]];
+      // Try chafa first (terminal ASCII art)
       let displayed = false;
-      for (const [viewer, ...args] of viewers) {
-        const result = Bun.spawnSync([viewer, ...args], {
-          stdout: "inherit",
+      const chafaResult = Bun.spawnSync(["chafa", captchaPath], {
+        stdout: "inherit",
+        stderr: "ignore",
+      });
+      if (chafaResult.exitCode === 0) {
+        displayed = true;
+      } else {
+        // Fallback: open in default viewer
+        const openResult = Bun.spawnSync(["open", captchaPath], {
+          stdout: "ignore",
           stderr: "ignore",
         });
-        if (result.exitCode === 0) {
+        if (openResult.exitCode === 0) {
           displayed = true;
-          break;
         }
       }
       if (!displayed) {
@@ -734,8 +740,8 @@ async function cmdSubmit(args: string[]): Promise<void> {
   const code = readFileSync(solution, "utf-8");
 
   try {
-    const lang = getLangId(solution);
-    const rid = await submitWithCaptcha(pid, code, lang, true, cookies);
+    const { lang, enableO2 } = getLangConfig(solution);
+    const rid = await submitWithCaptcha(pid, code, lang, enableO2, cookies);
     console.log(`Submitted! Record ID: ${rid}`);
     console.log(`Track with: lg-judge track ${rid}`);
   } catch (e) {
@@ -843,8 +849,8 @@ async function cmdAuto(args: string[]): Promise<void> {
 
   let rid: number;
   try {
-    const lang = getLangId(solution);
-    rid = await submitWithCaptcha(pid, code, lang, true, cookies);
+    const { lang, enableO2 } = getLangConfig(solution);
+    rid = await submitWithCaptcha(pid, code, lang, enableO2, cookies);
     console.log(`Submitted! Record ID: ${rid}`);
   } catch (e) {
     console.error(`Submit failed: ${e.message}`);
@@ -910,6 +916,23 @@ async function cmdConfig(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+// Languages that should enable O2 by default (from vscode-luogu defaultLanguageVersion)
+const O2_MAP: Record<string, boolean> = {
+  "cpp": true,
+  "cc": true,
+  "cxx": true,
+  "c": true,
+  "rs": true,
+  "hs": true,
+  "ml": true,
+};
+
+function getLangConfig(filePath: string): { lang: number; enableO2: boolean } {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const lang = getLangId(filePath);
+  const enableO2 = O2_MAP[ext] ?? false;
+  return { lang, enableO2 };
+}
 
 const [subcmd, ...subArgs] = process.argv.slice(2);
 
@@ -957,3 +980,4 @@ Examples:
 `);
     break;
 }
+
