@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Commit one LeetCode solution using metadata from its generated header."""
+"""Commit one solution using metadata from its generated header or filename.
+
+Auto-detects the source:
+- Files under a ``luogu/`` directory: extract ``Pxxx`` from the filename.
+- Otherwise: read ``@lc app=... id=... lang=...`` from the file header.
+"""
 
 from __future__ import annotations
 
@@ -11,15 +16,7 @@ from pathlib import Path
 
 META_RE = re.compile(r"@lc\s+app=\S+\s+id=(\d+)\s+lang=([^\s*]+)")
 TITLE_RE = re.compile(r"\[(\d+)]\s+(.+?)\s*(?:\*/)?$", re.MULTILINE)
-
-
-def normalize_filename(path: Path) -> Path | None:
-    """If stem contains '.', return a new path with the first '.' replaced by '-'."""
-    stem = path.stem
-    if "." not in stem:
-        return None
-    new_stem = stem.replace(".", "-", 1)
-    return path.with_stem(new_stem)
+PROBLEM_RE = re.compile(r"^(P\d+)", re.IGNORECASE)
 
 
 class CommitError(Exception):
@@ -45,7 +42,32 @@ def repository_root(cwd: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def commit_message(path: Path) -> str:
+def normalize_filename(path: Path) -> Path | None:
+    """If stem contains '.', return a new path with the first '.' replaced by '-'."""
+    stem = path.stem
+    if "." not in stem:
+        return None
+    new_stem = stem.replace(".", "-", 1)
+    return path.with_stem(new_stem)
+
+
+def is_luogu(path: Path, root: Path) -> bool:
+    """Return True if the file lives under a ``luogu/`` directory."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return relative.parts[0].lower() == "luogu"
+
+
+def luogu_message(path: Path) -> str:
+    match = PROBLEM_RE.match(path.stem)
+    if match is None:
+        raise CommitError(f"文件名无法提取洛谷题号（期望 Pxxx）：{path.name}")
+    return f"luogu {match.group(1).upper()}"
+
+
+def leetcode_message(path: Path) -> str:
     try:
         header = "\n".join(path.read_text(encoding="utf-8").splitlines()[:64])
     except (OSError, UnicodeError) as error:
@@ -66,9 +88,9 @@ def commit_message(path: Path) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="读取 LeetCode 文件头，暂存该文件并生成 Git commit",
+        description="读取题解文件或文件名，暂存该文件并生成 Git commit",
     )
-    parser.add_argument("file", type=Path, help="要提交的 LeetCode 题解文件")
+    parser.add_argument("file", type=Path, help="要提交的题解文件")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -94,13 +116,16 @@ def main() -> int:
         if not path.is_file():
             raise CommitError(f"文件不存在：{path}")
 
-        new_path = normalize_filename(path)
-        if new_path is not None:
-            path.rename(new_path)
-            path = new_path
-            relative_path = path.relative_to(root)
+        if is_luogu(path, root):
+            message = luogu_message(path)
+        else:
+            new_path = normalize_filename(path)
+            if new_path is not None:
+                path.rename(new_path)
+                path = new_path
+                relative_path = path.relative_to(root)
+            message = leetcode_message(path)
 
-        message = commit_message(path)
         if args.dry_run:
             print(message)
             return 0
