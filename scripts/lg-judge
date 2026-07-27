@@ -249,28 +249,9 @@ async function submitWithCaptcha(
       const captchaImg = await getCaptchaImage(cookies);
       const captchaPath = `/tmp/luogu-captcha-${Date.now()}.png`;
       writeFileSync(captchaPath, captchaImg);
+      console.log(`验证码图片: ${captchaPath}`);
+      Bun.spawnSync(["open", captchaPath], { stdout: "ignore", stderr: "ignore" });
 
-      // Try chafa first (terminal ASCII art)
-      let displayed = false;
-      const chafaResult = Bun.spawnSync(["chafa", captchaPath], {
-        stdout: "inherit",
-        stderr: "ignore",
-      });
-      if (chafaResult.exitCode === 0) {
-        displayed = true;
-      } else {
-        // Fallback: open in default viewer
-        const openResult = Bun.spawnSync(["open", captchaPath], {
-          stdout: "ignore",
-          stderr: "ignore",
-        });
-        if (openResult.exitCode === 0) {
-          displayed = true;
-        }
-      }
-      if (!displayed) {
-        console.log(`验证码图片: ${captchaPath}`);
-      }
 
       const input = await prompt("请输入验证码（留空刷新）: ");
       if (input === "") {
