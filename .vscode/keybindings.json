@@ -1,0 +1,27 @@
+[
+    {
+        "key": "ctrl+b c",
+        "command": "workbench.action.tasks.runTask",
+        "args": "提交当前题解"
+    },
+    {
+        "key": "ctrl+b alt+c",
+        "command": "workbench.action.tasks.runTask",
+        "args": "预览当前 commit message"
+    },
+    {
+        "key": "ctrl+b j",
+        "command": "workbench.action.tasks.runTask",
+        "args": "本地判题（当前文件）"
+    },
+    {
+        "key": "ctrl+b f",
+        "command": "workbench.action.tasks.runTask",
+        "args": "从洛谷获取样例"
+    },
+    {
+        "key": "ctrl+b s",
+        "command": "workbench.action.tasks.runTask",
+        "args": "提交到洛谷"
+    }
+]

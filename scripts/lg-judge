@@ -1,0 +1,695 @@
+#!/usr/bin/env bun
+/**
+ * lg-judge — local judge + Luogu API client for solve_q.
+ *
+ * Subcommands:
+ *   run       Compile/run a solution against local testcases
+ *   fetch     Download sample testcases from a Luogu problem
+ *   submit    Submit a solution to Luogu
+ *   track     Poll a submission until it finishes
+ *   download  Download a wrong testcase from a finished submission
+ *   config    Save Luogu cookies
+ */
+
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from "fs";
+import { join, parse } from "path";
+
+// ---------------------------------------------------------------------------
+// Config — cookies stored in ~/.luogu-cookies (JSON: { uid, client_id })
+// ---------------------------------------------------------------------------
+
+interface LuoguCookies {
+  uid: string;
+  client_id: string;
+}
+
+function configPath(): string {
+  return `${process.env.HOME}/.luogu-cookies`;
+}
+
+function loadCookies(): LuoguCookies | null {
+  try {
+    const raw = readFileSync(configPath(), "utf-8");
+    const data = JSON.parse(raw) as LuoguCookies;
+    if (data.uid && data.client_id) return data;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCookies(cookies: LuoguCookies): void {
+  writeFileSync(configPath(), JSON.stringify(cookies, null, 2));
+  console.log(`Cookies saved to ${configPath()}`);
+}
+
+function ensureCookies(): LuoguCookies {
+  const cookies = loadCookies();
+  if (!cookies) {
+    console.error(
+      `No cookies found. Run: lg-judge config <uid> <client_id>\n` +
+        `Get them from browser devtools on luogu.com.cn (_uid + __client_id cookies)`,
+    );
+    process.exit(2);
+  }
+  return cookies;
+}
+
+function cookieHeader(cookies: LuoguCookies): string {
+  return `_uid=${cookies.uid}; __client_id=${cookies.client_id}`;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
+
+const UA = "lg-judge/1.0 (Bun)";
+
+async function luoguGet(path: string, cookies: LuoguCookies): Promise<Response> {
+  return fetch(`https://www.luogu.com.cn${path}`, {
+    headers: {
+      "user-agent": UA,
+      cookie: cookieHeader(cookies),
+      "x-luogu-type": "content-only",
+      "x-lentille-request": "content-only",
+    },
+  });
+}
+
+async function luoguPost(
+  path: string,
+  cookies: LuoguCookies,
+  body: unknown,
+  csrfToken: string,
+): Promise<Response> {
+  return fetch(`https://www.luogu.com.cn${path}`, {
+    method: "POST",
+    headers: {
+      "user-agent": UA,
+      cookie: cookieHeader(cookies),
+      "content-type": "application/json",
+      referer: "https://www.luogu.com.cn/",
+      "x-csrf-token": csrfToken,
+      "x-luogu-type": "content-only",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// CSRF token — fetch problem page and extract from meta tag
+// ---------------------------------------------------------------------------
+
+async function getCsrfToken(pid: string, cookies: LuoguCookies): Promise<string> {
+  const resp = await fetch(`https://www.luogu.com.cn/problem/${pid}`, {
+    headers: {
+      "user-agent": UA,
+      cookie: cookieHeader(cookies),
+    },
+  });
+  const html = await resp.text();
+  const match = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/);
+  if (!match) {
+    console.error("Failed to extract CSRF token. Are your cookies valid?");
+    process.exit(2);
+  }
+  return match[1];
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: run (local judge)
+// ---------------------------------------------------------------------------
+
+interface TestCase {
+  name: string;
+  input: string;
+  expected: string;
+}
+
+function detectLanguage(filePath: string): "cpp" | "rust" | "python" {
+  const ext = parse(filePath).ext.toLowerCase();
+  if (ext === ".cpp" || ext === ".cc") return "cpp";
+  if (ext === ".rs") return "rust";
+  if (ext === ".py") return "python";
+  console.error(`Unsupported language: ${ext}`);
+  process.exit(2);
+}
+
+function loadTestcasesToml(filePath: string): { cases: TestCase[]; timeLimit: number } {
+  const content = readFileSync(filePath, "utf-8");
+  const lines = content.split("\n");
+
+  let timeLimit = 1.0;
+  const cases: TestCase[] = [];
+  let currentCase: Partial<TestCase> | null = null;
+  let multilineValue: string[] = [];
+  let multilineKey: string | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (trimmed === "[[cases]]") {
+      if (currentCase?.input !== undefined && currentCase?.expected !== undefined) {
+        cases.push({
+          name: currentCase.name ?? `case-${cases.length + 1}`,
+          input: currentCase.input,
+          expected: currentCase.expected,
+        });
+      }
+      currentCase = {};
+      continue;
+    }
+
+    if (multilineKey) {
+      if (trimmed === '"""') {
+        const value = multilineValue.join("\n");
+        if (multilineKey === "input" && currentCase) currentCase.input = value;
+        else if (multilineKey === "expected" && currentCase) currentCase.expected = value;
+        multilineKey = null;
+        multilineValue = [];
+      } else {
+        multilineValue.push(line);
+      }
+      continue;
+    }
+
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx > 0 && !trimmed.startsWith("#")) {
+      const key = trimmed.slice(0, eqIdx).trim();
+      let value = trimmed.slice(eqIdx + 1).trim();
+
+      if (value === '"""') {
+        multilineKey = key;
+        multilineValue = [];
+        continue;
+      }
+
+      if (value.startsWith('"') && value.endsWith('"')) {
+        value = value.slice(1, -1);
+      }
+
+      if (key === "time_limit") timeLimit = parseFloat(value);
+      else if (key === "name" && currentCase) currentCase.name = value;
+      else if (key === "input" && currentCase) currentCase.input = value;
+      else if (key === "expected" && currentCase) currentCase.expected = value;
+    }
+  }
+
+  if (currentCase?.input !== undefined && currentCase?.expected !== undefined) {
+    cases.push({
+      name: currentCase.name ?? `case-${cases.length + 1}`,
+      input: currentCase.input,
+      expected: currentCase.expected,
+    });
+  }
+
+  return { cases, timeLimit };
+}
+
+function loadTestcasesDir(dirPath: string): { cases: TestCase[]; timeLimit: number } {
+  if (!existsSync(dirPath)) {
+    console.error(`Testcase directory not found: ${dirPath}`);
+    process.exit(2);
+  }
+
+  // Read time limit from config.toml if available
+  let timeLimit = 1.0;
+  const configPath = join(dirPath, "config.toml");
+  if (existsSync(configPath)) {
+    try {
+      const content = readFileSync(configPath, "utf-8");
+      const match = content.match(/time_limit\s*=\s*([\d.]+)/);
+      if (match && parseFloat(match[1]) > 0) {
+        timeLimit = parseFloat(match[1]);
+      }
+    } catch {
+      // Ignore parse errors, use default
+    }
+  }
+
+  const inFiles = (
+    [...new Bun.Glob("*.in").scanSync({ cwd: dirPath, absolute: false })] as string[]
+  ).sort();
+
+  if (inFiles.length === 0) {
+    console.error(`No .in files found in ${dirPath}`);
+    process.exit(2);
+  }
+
+  const cases: TestCase[] = [];
+  for (const inFile of inFiles) {
+    const stem = inFile.replace(/\.in$/, "");
+    const outFile = `${stem}.out`;
+    const inPath = join(dirPath, inFile);
+    const outPath = join(dirPath, outFile);
+
+    if (!existsSync(outPath)) {
+      console.error(`Missing .out file: ${outFile}`);
+      process.exit(2);
+    }
+
+    cases.push({
+      name: stem,
+      input: readFileSync(inPath, "utf-8"),
+      expected: readFileSync(outPath, "utf-8"),
+    });
+  }
+
+  return { cases, timeLimit };
+}
+
+function normalize(text: string): string {
+  const lines = text.split("\n");
+  const cleaned = lines.map((l) => l.trimEnd());
+  while (cleaned.length > 0 && cleaned[cleaned.length - 1] === "") cleaned.pop();
+  return cleaned.join("\n");
+}
+
+function buildDiff(expected: string, actual: string): string {
+  const expectedLines = expected.split("\n");
+  const actualLines = actual.split("\n");
+  const diff: string[] = [];
+  const maxLen = Math.max(expectedLines.length, actualLines.length);
+  for (let i = 0; i < maxLen; i++) {
+    const e = expectedLines[i] ?? "";
+    const a = actualLines[i] ?? "";
+    if (e !== a) {
+      if (e) diff.push(`- ${e}`);
+      if (a) diff.push(`+ ${a}`);
+    }
+  }
+  return diff.join("\n");
+}
+
+async function cmdRun(args: string[]): Promise<void> {
+  if (args.length < 1) {
+    console.error("Usage: lg-judge run <solution> [testcases]");
+    process.exit(2);
+  }
+
+  const solution = args[0];
+  const lang = detectLanguage(solution);
+
+  let testcasesPath: string;
+  if (args.length >= 2) {
+    testcasesPath = args[1];
+  } else {
+    // Auto-detect: prefer testcases/<stem>.toml, then testcases/<stem>/ directory
+    const stem = parse(solution).name;
+    const dir = parse(solution).dir;
+    const testcasesToml = join(dir, "testcases", `${stem}.toml`);
+    const testcasesDir = join(dir, "testcases", stem);
+
+    if (existsSync(testcasesToml)) {
+      testcasesPath = testcasesToml;
+    } else if (existsSync(testcasesDir)) {
+      testcasesPath = testcasesDir;
+    } else {
+      console.error(`No testcases found. Expected ${testcasesToml} or ${testcasesDir}`);
+      process.exit(2);
+    }
+  }
+
+  let cases: TestCase[];
+  let timeLimit: number;
+
+  if (testcasesPath.endsWith(".toml")) {
+    ({ cases, timeLimit } = loadTestcasesToml(testcasesPath));
+  } else {
+    ({ cases, timeLimit } = loadTestcasesDir(testcasesPath));
+  }
+
+  console.log(`Language: ${lang}`);
+  console.log(`Testcases: ${cases.length}`);
+  console.log(`Time limit: ${timeLimit}s`);
+  console.log("-".repeat(40));
+
+  // Build phase
+  let binary: string | null = null;
+  const tmpDir = `/tmp/lg-judge-${Date.now()}`;
+
+  if (lang === "cpp") {
+    binary = `${tmpDir}/${parse(solution).name}`;
+    mkdirSync(tmpDir, { recursive: true });
+    const proc = Bun.spawn([
+      "clang++", "-std=c++20", "-O2", "-Wall", "-Wextra", "-Wpedantic",
+      solution, "-o", binary,
+    ], { stdout: "pipe", stderr: "pipe" });
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      console.error(`Compilation failed:\n${stderr}`);
+      process.exit(1);
+    }
+  } else if (lang === "rust") {
+    binary = `${tmpDir}/${parse(solution).name}`;
+    mkdirSync(tmpDir, { recursive: true });
+    const proc = Bun.spawn([
+      "rustc", "-O", "--edition", "2021", solution, "-o", binary,
+    ], { stdout: "pipe", stderr: "pipe" });
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      console.error(`Compilation failed:\n${stderr}`);
+      process.exit(1);
+    }
+  } else {
+    binary = solution;
+  }
+
+  // Run cases
+  for (let i = 0; i < cases.length; i++) {
+    const tc = cases[i];
+    const start = performance.now();
+
+    let actual: string;
+    let exitCode: number;
+    let stderr: string;
+
+    if (lang === "python") {
+      const proc = Bun.spawn(["python3", binary!], {
+        stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      });
+      proc.stdin.write(tc.input);
+      proc.stdin.flush();
+      proc.stdin.end();
+      actual = await new Response(proc.stdout).text();
+      stderr = await new Response(proc.stderr).text();
+      exitCode = await proc.exited;
+    } else {
+      const proc = Bun.spawn([binary!], {
+        stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      });
+      proc.stdin.write(tc.input);
+      proc.stdin.flush();
+      proc.stdin.end();
+      actual = await new Response(proc.stdout).text();
+      stderr = await new Response(proc.stderr).text();
+      exitCode = await proc.exited;
+    }
+
+    const elapsed = (performance.now() - start) / 1000;
+
+    if (elapsed > timeLimit) {
+      console.log(`[${i + 1}/${cases.length}] ${tc.name}: TLE (${elapsed.toFixed(3)}s > ${timeLimit}s)`);
+      break;
+    }
+
+    if (exitCode !== 0) {
+      console.log(`[${i + 1}/${cases.length}] ${tc.name}: RE (${elapsed.toFixed(3)}s)`);
+      console.log(`  ${stderr.split("\n")[0]}`);
+      break;
+    }
+
+    const normalizedActual = normalize(actual);
+    const expected = normalize(tc.expected);
+
+    if (normalizedActual === expected) {
+      console.log(`[${i + 1}/${cases.length}] ${tc.name}: AC (${elapsed.toFixed(3)}s)`);
+    } else {
+      console.log(`[${i + 1}/${cases.length}] ${tc.name}: WA (${elapsed.toFixed(3)}s)`);
+      console.log(buildDiff(expected, normalizedActual));
+      break;
+    }
+  }
+
+  // Cleanup
+  if (lang !== "python") {
+    await Bun.spawn(["rm", "-rf", tmpDir]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: fetch (download samples from Luogu problem)
+// ---------------------------------------------------------------------------
+
+async function cmdFetch(args: string[]): Promise<void> {
+  if (args.length < 1) {
+    console.error("Usage: lg-judge fetch <pid> [output_dir]");
+    process.exit(2);
+  }
+
+  const pid = args[0];
+  const cookies = ensureCookies();
+
+  // Fetch problem data from API
+  const resp = await luoguGet(`/problem/${pid}`, cookies);
+  const json = (await resp.json()) as any;
+  const problem = json.data?.problem;
+
+  if (!problem) {
+    console.error(`Problem not found: ${pid}`);
+    process.exit(2);
+  }
+
+  const samples = problem.samples || [];
+
+  if (samples.length === 0) {
+    console.error(`No sample testcases found for ${pid}`);
+    process.exit(2);
+  }
+
+  const outputDir = args[1] ?? `luogu/testcases/${pid}`;
+  mkdirSync(outputDir, { recursive: true });
+
+  // Read old sample count from config.toml (to clean up only old samples)
+  let oldSampleCount = 0;
+  const configPath = join(outputDir, "config.toml");
+  if (existsSync(configPath)) {
+    try {
+      const oldConfig = readFileSync(configPath, "utf-8");
+      const match = oldConfig.match(/sample_count\s*=\s*(\d+)/);
+      if (match) oldSampleCount = parseInt(match[1]);
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Clean up only old sample files (1..sample_count), preserve downloaded error testcases
+  for (let i = 1; i <= oldSampleCount; i++) {
+    Bun.spawnSync(["rm", "-f", join(outputDir, `${i}.in`)]);
+    Bun.spawnSync(["rm", "-f", join(outputDir, `${i}.out`)]);
+  }
+
+  // Save problem metadata to config.toml
+  const limits = problem.limits || {};
+  const timeLimitMs = limits.time?.[0] ?? 1000;
+  const memoryLimitKb = limits.memory?.[0] ?? 128000;
+  let config = `pid = "${pid}"\n`;
+  config += `name = ${JSON.stringify(problem.name)}\n`;
+  config += `difficulty = ${problem.difficulty ?? 0}\n`;
+  config += `time_limit = ${timeLimitMs / 1000}\n`;
+  config += `memory_limit = ${Math.round(memoryLimitKb / 1024)}\n`;
+  config += `tags = [${(problem.tags ?? []).join(", ")}]\n`;
+  config += `sample_count = ${samples.length}\n`;
+  config += `source_url = "https://www.luogu.com.cn/problem/${pid}"\n`;
+  writeFileSync(configPath, config);
+
+  // Save sample testcases as .in/.out files
+  for (let i = 0; i < samples.length; i++) {
+    const [input, output] = samples[i];
+    writeFileSync(join(outputDir, `${i + 1}.in`), input);
+    writeFileSync(join(outputDir, `${i + 1}.out`), output);
+    console.log(`Saved: ${i + 1}.in, ${i + 1}.out`);
+  }
+
+  console.log(`\nFetched ${samples.length} sample(s) to ${outputDir}`);
+  console.log(`Problem: ${problem.name}`);
+  console.log(`Limits: ${timeLimitMs / 1000}s, ${Math.round(memoryLimitKb / 1024)}MB`);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: submit (submit solution to Luogu)
+// ---------------------------------------------------------------------------
+
+async function cmdSubmit(args: string[]): Promise<void> {
+  if (args.length < 2) {
+    console.error("Usage: lg-judge submit <solution> <pid>");
+    process.exit(2);
+  }
+
+  const solution = args[0];
+  const pid = args[1];
+  const cookies = ensureCookies();
+
+  const code = readFileSync(solution, "utf-8");
+  const csrfToken = await getCsrfToken(pid, cookies);
+
+  const resp = await luoguPost(`/fe/api/problem/submit/${pid}`, cookies, { code }, csrfToken);
+  const data = (await resp.json()) as any;
+
+  if (data.rid) {
+    console.log(`Submitted! Record ID: ${data.rid}`);
+    console.log(`Track with: lg-judge track ${data.rid}`);
+  } else {
+    console.error(`Submit failed: ${JSON.stringify(data)}`);
+    process.exit(2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: track (poll submission status)
+// ---------------------------------------------------------------------------
+
+async function cmdTrack(args: string[]): Promise<void> {
+  if (args.length < 1) {
+    console.error("Usage: lg-judge track <rid>");
+    process.exit(2);
+  }
+
+  const rid = args[0];
+  const cookies = ensureCookies();
+
+  let record: any = null;
+  for (let i = 0; i < 60; i++) {
+    const resp = await luoguGet(`/record/${rid}`, cookies);
+    const data = (await resp.json()) as any;
+    record = data.data?.record;
+
+    const status = record?.status;
+    const score = record?.score;
+    const verdict = record?.verdict?.key ?? "?";
+
+    process.stdout.write(`\r[${i + 1}/60] Status: ${verdict} (${status}) Score: ${score ?? "-"}   `);
+
+    if (status >= 2) {
+      console.log("\n");
+      break;
+    }
+
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+
+  if (!record) {
+    console.error("Failed to fetch record");
+    process.exit(2);
+  }
+
+  const verdict = record.verdict?.key ?? "Unknown";
+  const score = record.score ?? 0;
+  const time = record.time ?? "-";
+  const memory = record.memory ?? "-";
+
+  console.log(`Verdict: ${verdict}`);
+  console.log(`Score: ${score}`);
+  console.log(`Time: ${time}ms`);
+  console.log(`Memory: ${memory}KB`);
+
+  if (verdict === "WA" || verdict === "TLE" || verdict === "RE") {
+    console.log(`\nDownload testcase: lg-judge download ${rid}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: download (download wrong testcase)
+// ---------------------------------------------------------------------------
+
+async function cmdDownload(args: string[]): Promise<void> {
+  if (args.length < 1) {
+    console.error("Usage: lg-judge download <rid> [output_dir]");
+    process.exit(2);
+  }
+
+  const rid = args[0];
+  const cookies = ensureCookies();
+
+  const queryResp = await luoguGet(`/fe/api/record/queryDownloadableTestcase/${rid}`, cookies);
+  const queryData = (await queryResp.json()) as any;
+  const testcaseId = queryData.data?.testcaseId ?? queryData.testcaseId;
+
+  if (!testcaseId) {
+    console.error("No downloadable testcase available (maybe AC or not finished?)");
+    process.exit(2);
+  }
+
+  const csrfToken = await getCsrfToken("P1001", cookies);
+  const dlResp = await luoguPost(
+    `/fe/api/record/downloadTestcase/${rid}`,
+    cookies,
+    { testcaseId },
+    csrfToken,
+  );
+  const dlData = (await dlResp.json()) as any;
+
+  if (dlData.data) {
+    const outputDir = args[1] ?? ".";
+    mkdirSync(outputDir, { recursive: true });
+
+    const inPath = join(outputDir, `${rid}.in`);
+    const outPath = join(outputDir, `${rid}.out`);
+
+    writeFileSync(inPath, dlData.data.input);
+    writeFileSync(outPath, dlData.data.output);
+
+    console.log(`Downloaded testcase ${testcaseId}:`);
+    console.log(`  Input:  ${inPath}`);
+    console.log(`  Output: ${outPath}`);
+  } else {
+    console.error(`Download failed: ${JSON.stringify(dlData)}`);
+    process.exit(2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: config (save cookies)
+// ---------------------------------------------------------------------------
+
+async function cmdConfig(args: string[]): Promise<void> {
+  if (args.length < 2) {
+    console.error("Usage: lg-judge config <uid> <client_id>");
+    console.error("");
+    console.error("Get these from browser devtools on luogu.com.cn:");
+    console.error("  1. Open https://www.luogu.com.cn/");
+    console.error("  2. DevTools > Application > Cookies");
+    console.error("  3. Copy _uid and __client_id values");
+    process.exit(2);
+  }
+
+  saveCookies({ uid: args[0], client_id: args[1] });
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+const [subcmd, ...subArgs] = process.argv.slice(2);
+
+switch (subcmd) {
+  case "run":
+    await cmdRun(subArgs);
+    break;
+  case "fetch":
+    await cmdFetch(subArgs);
+    break;
+  case "submit":
+    await cmdSubmit(subArgs);
+    break;
+  case "track":
+    await cmdTrack(subArgs);
+    break;
+  case "download":
+    await cmdDownload(subArgs);
+    break;
+  case "config":
+    await cmdConfig(subArgs);
+    break;
+  default:
+    console.log(`lg-judge — local judge + Luogu API client
+
+Subcommands:
+  run <solution> [testcases]   Local judge (auto-detects testcases/ dir or .toml)
+  fetch <pid> [output_dir]     Download sample testcases from Luogu
+  submit <solution> <pid>      Submit solution to Luogu
+  track <rid>                  Poll submission until finished
+  download <rid> [output_dir]  Download wrong testcase from finished submission
+  config <uid> <client_id>     Save Luogu cookies
+
+Examples:
+  lg-judge run luogu/P1001.cpp
+  lg-judge fetch P1001
+  lg-judge submit luogu/P1001.cpp P1001
+  lg-judge track 12345678
+  lg-judge download 12345678 luogu/testcases/P1001/
+`);
+    break;
+}

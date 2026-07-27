@@ -2,7 +2,7 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "提交当前 LeetCode 题解",
+            "label": "提交当前题解",
             "type": "process",
             "command": "${workspaceFolder}/scripts/lc-commit",
             "args": [
@@ -20,7 +20,7 @@
             }
         },
         {
-            "label": "预览当前 LeetCode commit message",
+            "label": "预览当前 commit message",
             "type": "process",
             "command": "${workspaceFolder}/scripts/lc-commit",
             "args": [
@@ -46,6 +46,54 @@
                 "cwd": "${workspaceFolder}"
             },
             "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "本地判题（当前文件）",
+            "type": "shell",
+            "command": "bun run \"${workspaceFolder}/scripts/lg-judge\" run \"${file}\"",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
+            },
+        {
+            "label": "从洛谷获取样例",
+            "type": "shell",
+            "command": "PID=$(echo \"${fileBasenameNoExtension}\" | grep -oE '^P[0-9]+'); bun run \"${workspaceFolder}/scripts/lg-judge\" fetch \"$PID\" \"${fileDirname}/testcases/$PID\"",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "提交到洛谷",
+            "type": "shell",
+            "command": "PID=$(echo \"${fileBasenameNoExtension}\" | grep -oE '^P[0-9]+'); bun run \"${workspaceFolder}/scripts/lg-judge\" submit \"${file}\" \"$PID\"",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",

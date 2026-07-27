@@ -1,153 +1,122 @@
-#!/usr/bin/env python3
-"""Commit one solution using metadata from its generated header or filename.
+#!/usr/bin/env bun
+/**
+ * lc-commit — commit a solution using metadata from its header or filename.
+ *
+ * Auto-detects the source:
+ * - Files under a `luogu/` directory: extract `Pxxx` from the filename.
+ * - Otherwise: read `@lc app=... id=... lang=...` from the file header.
+ */
 
-Auto-detects the source:
-- Files under a ``luogu/`` directory: extract ``Pxxx`` from the filename.
-- Otherwise: read ``@lc app=... id=... lang=...`` from the file header.
-"""
+import { readFileSync, existsSync } from "fs";
+import { parse, relative } from "path";
 
-from __future__ import annotations
+const META_RE = /@lc\s+app=\S+\s+id=(\d+)\s+lang=([^\s*]+)/;
+const TITLE_RE = /\[(\d+)]\s+(.+?)\s*(?:\*\/)?$/gm;
+const PROBLEM_RE = /^(P\d+)/i;
 
-import argparse
-import re
-import subprocess
-import sys
-from pathlib import Path
+function repositoryRoot(cwd: string): string {
+  const result = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd });
+  if (result.exitCode !== 0) {
+    console.error("lc-commit: 当前目录不在 Git 仓库中，或系统未安装 Git");
+    process.exit(2);
+  }
+  return result.stdout.toString().trim();
+}
 
-META_RE = re.compile(r"@lc\s+app=\S+\s+id=(\d+)\s+lang=([^\s*]+)")
-TITLE_RE = re.compile(r"\[(\d+)]\s+(.+?)\s*(?:\*/)?$", re.MULTILINE)
-PROBLEM_RE = re.compile(r"^(P\d+)", re.IGNORECASE)
+function runGit(args: string[], cwd: string): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd });
+  if (result.exitCode !== 0) {
+    console.error(`lc-commit: Git 命令失败（退出码 ${result.exitCode}）`);
+    process.exit(result.exitCode);
+  }
+  return result.stdout.toString();
+}
 
+function normalizeFilename(filePath: string): string | null {
+  const stem = parse(filePath).name;
+  if (!stem.includes(".")) return null;
+  const newStem = stem.replace(".", "-", 1);
+  return filePath.replace(stem, newStem);
+}
 
-class CommitError(Exception):
-    """An expected, user-actionable CLI error."""
+function isLuogu(filePath: string, root: string): boolean {
+  const rel = relative(root, filePath);
+  return rel.split("/")[0].toLowerCase() === "luogu";
+}
 
+function luoguMessage(filePath: string): string {
+  const stem = parse(filePath).name;
+  const match = PROBLEM_RE.exec(stem);
+  if (!match) {
+    console.error(`lc-commit: 文件名无法提取洛谷题号（期望 Pxxx）：${filePath}`);
+    process.exit(2);
+  }
+  return `luogu ${match[1].toUpperCase()}`;
+}
 
-def run_git(*args: str, cwd: Path, capture: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-    )
+function leetcodeMessage(filePath: string): string {
+  const content = readFileSync(filePath, "utf-8");
+  const header = content.split("\n").slice(0, 64).join("\n");
 
+  const metaMatch = META_RE.exec(header);
+  if (!metaMatch) {
+    console.error(`lc-commit: 文件头缺少 @lc app=... id=... lang=...：${filePath}`);
+    process.exit(2);
+  }
 
-def repository_root(cwd: Path) -> Path:
-    try:
-        result = run_git("rev-parse", "--show-toplevel", cwd=cwd, capture=True)
-    except (FileNotFoundError, subprocess.CalledProcessError) as error:
-        raise CommitError("当前目录不在 Git 仓库中，或系统未安装 Git") from error
-    return Path(result.stdout.strip()).resolve()
+  const [, problemId, language] = metaMatch;
 
+  const titles = [...header.matchAll(TITLE_RE)];
+  const title = titles.find(([_, id]) => id === problemId)?.[2]?.trim();
+  if (!title) {
+    console.error(`lc-commit: 文件头缺少 [${problemId}] 题目标题：${filePath}`);
+    process.exit(2);
+  }
 
-def normalize_filename(path: Path) -> Path | None:
-    """If stem contains '.', return a new path with the first '.' replaced by '-'."""
-    stem = path.stem
-    if "." not in stem:
-        return None
-    new_stem = stem.replace(".", "-", 1)
-    return path.with_stem(new_stem)
+  return `[${problemId}] ${title} ${language}`;
+}
 
+const args = process.argv.slice(2);
+const dryRun = args.includes("--dry-run");
+const fileArg = args.find((a) => !a.startsWith("--"));
 
-def is_luogu(path: Path, root: Path) -> bool:
-    """Return True if the file lives under a ``luogu/`` directory."""
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return False
-    return relative.parts[0].lower() == "luogu"
+if (!fileArg) {
+  console.error("Usage: lc-commit <file> [--dry-run]");
+  process.exit(2);
+}
 
+const root = repositoryRoot(process.cwd());
+let filePath = fileArg.startsWith("/") ? fileArg : `${process.cwd()}/${fileArg}`;
+filePath = filePath.replace(/\/+$/, "");
 
-def luogu_message(path: Path) -> str:
-    match = PROBLEM_RE.match(path.stem)
-    if match is None:
-        raise CommitError(f"文件名无法提取洛谷题号（期望 Pxxx）：{path.name}")
-    return f"luogu {match.group(1).upper()}"
+if (!existsSync(filePath)) {
+  console.error(`lc-commit: 文件不存在：${filePath}`);
+  process.exit(2);
+}
 
+let relativePath = relative(root, filePath);
+let message: string;
 
-def leetcode_message(path: Path) -> str:
-    try:
-        header = "\n".join(path.read_text(encoding="utf-8").splitlines()[:64])
-    except (OSError, UnicodeError) as error:
-        raise CommitError(f"无法读取 UTF-8 文件：{path}") from error
+if (isLuogu(filePath, root)) {
+  message = luoguMessage(filePath);
+} else {
+  const newPath = normalizeFilename(filePath);
+  if (newPath && newPath !== filePath) {
+    Bun.write(newPath, readFileSync(filePath));
+    // Remove old file if renamed
+    if (newPath !== filePath) {
+      Bun.spawnSync(["rm", filePath]);
+    }
+    filePath = newPath;
+    relativePath = relative(root, filePath);
+  }
+  message = leetcodeMessage(filePath);
+}
 
-    metadata = META_RE.search(header)
-    titles = TITLE_RE.findall(header)
-    if metadata is None:
-        raise CommitError(f"文件头缺少 @lc app=... id=... lang=...：{path}")
+if (dryRun) {
+  console.log(message);
+  process.exit(0);
+}
 
-    problem_id, language = metadata.groups()
-    title = next((text.strip() for title_id, text in titles if title_id == problem_id), None)
-    if title is None:
-        raise CommitError(f"文件头缺少 [{problem_id}] 题目标题：{path}")
-
-    return f"[{problem_id}] {title} {language}"
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="读取题解文件或文件名，暂存该文件并生成 Git commit",
-    )
-    parser.add_argument("file", type=Path, help="要提交的题解文件")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="只显示 commit message，不修改 Git 仓库",
-    )
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    try:
-        root = repository_root(Path.cwd())
-        path = args.file.expanduser()
-        if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
-        else:
-            path = path.resolve()
-
-        try:
-            relative_path = path.relative_to(root)
-        except ValueError as error:
-            raise CommitError(f"文件不在当前 Git 仓库中：{path}") from error
-        if not path.is_file():
-            raise CommitError(f"文件不存在：{path}")
-
-        if is_luogu(path, root):
-            message = luogu_message(path)
-        else:
-            new_path = normalize_filename(path)
-            if new_path is not None:
-                path.rename(new_path)
-                path = new_path
-                relative_path = path.relative_to(root)
-            message = leetcode_message(path)
-
-        if args.dry_run:
-            print(message)
-            return 0
-
-        run_git("add", "--", str(relative_path), cwd=root)
-        run_git(
-            "commit",
-            "--only",
-            "-m",
-            message,
-            "--",
-            str(relative_path),
-            cwd=root,
-        )
-        return 0
-    except CommitError as error:
-        print(f"lc-commit: {error}", file=sys.stderr)
-        return 2
-    except subprocess.CalledProcessError as error:
-        print(f"lc-commit: Git 命令失败（退出码 {error.returncode}）", file=sys.stderr)
-        return error.returncode or 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+runGit(["add", "--", relativePath], root);
+runGit(["commit", "--only", "-m", message, "--", relativePath], root);
