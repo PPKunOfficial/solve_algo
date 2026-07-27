@@ -2,33 +2,32 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "调试当前 LeetCode Rust 题目",
+            "name": "调试当前 Rust 程序",
             "type": "lldb",
             "request": "launch",
             "cargo": {
                 "args": [
                     "build",
-                    "--manifest-path",
-                    "${workspaceFolder}/leetcode/rust/Cargo.toml",
                     "--bin",
                     "${fileBasenameNoExtension}"
                 ],
                 "filter": {
                     "name": "${fileBasenameNoExtension}",
                     "kind": "bin"
-                }
+                },
+                "cwd": "${fileDirname}"
             },
             "args": [],
-            "cwd": "${workspaceFolder}/leetcode/rust",
+            "cwd": "${fileDirname}",
             "sourceLanguages": [
                 "rust"
             ]
         },
         {
-            "name": "调试当前洛谷 C++ 题目",
+            "name": "调试当前 C++ 文件",
             "type": "lldb",
             "request": "launch",
-            "preLaunchTask": "编译当前洛谷 C++ 题目",
+            "preLaunchTask": "编译当前 C++ 文件",
             "program": "${fileDirname}/.build/${fileBasenameNoExtension}",
             "args": [],
             "cwd": "${fileDirname}",
