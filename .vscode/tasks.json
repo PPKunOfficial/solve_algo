@@ -88,7 +88,7 @@
         {
             "label": "提交到洛谷",
             "type": "shell",
-            "command": "PID=$(echo \"${fileBasenameNoExtension}\" | grep -oE '^P[0-9]+'); bun run \"${workspaceFolder}/scripts/lg-judge\" submit \"${file}\" \"$PID\"",
+            "command": "PID=$(echo \"${fileBasenameNoExtension}\" | grep -oE '^P[0-9]+'); bun run \"${workspaceFolder}/scripts/lg-judge\" auto \"${file}\" \"$PID\"",
             "args": [],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -100,6 +100,6 @@
                 "clear": true,
                 "showReuseMessage": false
             }
-        }
+         }
     ]
 }

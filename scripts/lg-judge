@@ -117,6 +117,177 @@ async function getCsrfToken(pid: string, cookies: LuoguCookies): Promise<string>
 }
 
 // ---------------------------------------------------------------------------
+// Fetch CAPTCHA image from Luogu
+
+// Luogu record status code mapping
+const STATUS_MAP: Record<number, { key: string; name: string }> = {
+  0: { key: "WAIT", name: "等待中" },
+  1: { key: "JUDGE", name: "评测中" },
+  2: { key: "CE", name: "编译错误" },
+  3: { key: "RE", name: "运行时错误" },
+  4: { key: "TLE", name: "时间超限" },
+  5: { key: "MLE", name: "空间超限" },
+  6: { key: "WA", name: "答案错误" },
+  7: { key: "AC", name: "正确" },
+  12: { key: "AC", name: "正确" },
+};
+
+function getStatus(record: any): { key: string; name: string } {
+  const status = record?.status;
+  if (status !== undefined && STATUS_MAP[status]) {
+    return STATUS_MAP[status];
+  }
+  return { key: "UNKNOWN", name: "未知" };
+}
+
+// ---------------------------------------------------------------------------
+
+async function getCaptchaImage(cookies: LuoguCookies): Promise<Buffer> {
+  const resp = await fetch("https://www.luogu.com.cn/api/verify/captcha", {
+    headers: {
+      "user-agent": UA,
+      cookie: cookieHeader(cookies),
+    },
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch CAPTCHA: ${resp.status}`);
+  }
+  const contentType = resp.headers.get("content-type");
+  if (!contentType?.startsWith("image/")) {
+    throw new Error(`Expected image response, got: ${contentType}`);
+  }
+  const arrayBuffer = await resp.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: prompt user for input in terminal
+// ---------------------------------------------------------------------------
+
+function prompt(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    stdout.write(question);
+    stdin.once("data", (data) => {
+      resolve(data.toString().trim());
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Helper: submit code with CAPTCHA handling. Returns rid.
+// ---------------------------------------------------------------------------
+
+async function submitWithCaptcha(
+  pid: string,
+  code: string,
+  cookies: LuoguCookies,
+): Promise<number> {
+  let csrfToken = await getCsrfToken(pid, cookies);
+  let captchaSolution: string | undefined;
+
+  while (true) {
+    const resp = await luoguPost(
+      `/fe/api/problem/submit/${pid}`,
+      cookies,
+      { code, captcha: captchaSolution },
+      csrfToken,
+    );
+    const data = (await resp.json()) as any;
+
+    if (data.rid) {
+      return data.rid;
+    } else if (
+      data.errorType?.includes("InvalidCaptchaException") ||
+      data.errorMessage === "验证码错误"
+    ) {
+      console.log("\n洛谷要求验证码，正在获取验证码图片...");
+      const captchaImg = await getCaptchaImage(cookies);
+      const captchaPath = `/tmp/luogu-captcha-${Date.now()}.png`;
+      writeFileSync(captchaPath, captchaImg);
+
+      // Try to display in terminal using chafa or imgcat
+      const viewers = [["chafa", captchaPath], ["imgcat", captchaPath]];
+      let displayed = false;
+      for (const [viewer, ...args] of viewers) {
+        const result = Bun.spawnSync([viewer, ...args], {
+          stdout: "inherit",
+          stderr: "ignore",
+        });
+        if (result.exitCode === 0) {
+          displayed = true;
+          break;
+        }
+      }
+      if (!displayed) {
+        console.log(`验证码图片: ${captchaPath}`);
+      }
+
+      const input = await prompt("请输入验证码（留空刷新）: ");
+      if (input === "") {
+        csrfToken = await getCsrfToken(pid, cookies);
+        captchaSolution = undefined;
+        continue;
+      }
+      captchaSolution = input;
+    } else {
+      throw new Error(`Submit failed: ${JSON.stringify(data)}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (no console output, return values)
+// ---------------------------------------------------------------------------
+
+async function trackRecord(rid: string, cookies: LuoguCookies): Promise<any> {
+  let record: any = null;
+  for (let i = 0; i < 60; i++) {
+    const resp = await luoguGet(`/record/${rid}`, cookies);
+    const data = (await resp.json()) as any;
+    record = data.data?.record ?? data.currentData?.record;
+
+    const status = record?.status;
+    if (status >= 2) break;
+
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return record;
+}
+
+async function downloadTestcase(
+  rid: string,
+  pid: string,
+  cookies: LuoguCookies,
+  outputDir: string,
+): Promise<{ inPath: string; outPath: string } | null> {
+  const queryResp = await luoguGet(`/fe/api/record/queryDownloadableTestcase/${rid}`, cookies);
+  const queryData = (await queryResp.json()) as any;
+  const testcaseId = queryData.data?.testcaseId ?? queryData.testcaseId;
+
+  if (!testcaseId) return null;
+
+  const csrfToken = await getCsrfToken(pid, cookies);
+  const dlResp = await luoguPost(
+    `/fe/api/record/downloadTestcase/${rid}`,
+    cookies,
+    { testcaseId },
+    csrfToken,
+  );
+  const dlData = (await dlResp.json()) as any;
+
+  if (!dlData.data) return null;
+
+  mkdirSync(outputDir, { recursive: true });
+  const inPath = join(outputDir, `${rid}.in`);
+  const outPath = join(outputDir, `${rid}.out`);
+  writeFileSync(inPath, dlData.data.input);
+  writeFileSync(outPath, dlData.data.output);
+
+  return { inPath, outPath };
+}
+
+
+// ---------------------------------------------------------------------------
 // Subcommand: run (local judge)
 // ---------------------------------------------------------------------------
 
@@ -502,6 +673,11 @@ async function cmdFetch(args: string[]): Promise<void> {
 // Subcommand: submit (submit solution to Luogu)
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Subcommand: submit (submit solution to Luogu)
+// ---------------------------------------------------------------------------
+
 async function cmdSubmit(args: string[]): Promise<void> {
   if (args.length < 2) {
     console.error("Usage: lg-judge submit <solution> <pid>");
@@ -511,18 +687,14 @@ async function cmdSubmit(args: string[]): Promise<void> {
   const solution = args[0];
   const pid = args[1];
   const cookies = ensureCookies();
-
   const code = readFileSync(solution, "utf-8");
-  const csrfToken = await getCsrfToken(pid, cookies);
 
-  const resp = await luoguPost(`/fe/api/problem/submit/${pid}`, cookies, { code }, csrfToken);
-  const data = (await resp.json()) as any;
-
-  if (data.rid) {
-    console.log(`Submitted! Record ID: ${data.rid}`);
-    console.log(`Track with: lg-judge track ${data.rid}`);
-  } else {
-    console.error(`Submit failed: ${JSON.stringify(data)}`);
+  try {
+    const rid = await submitWithCaptcha(pid, code, cookies);
+    console.log(`Submitted! Record ID: ${rid}`);
+    console.log(`Track with: lg-judge track ${rid}`);
+  } catch (e) {
+    console.error(`Submit failed: ${e.message}`);
     process.exit(2);
   }
 }
@@ -544,11 +716,11 @@ async function cmdTrack(args: string[]): Promise<void> {
   for (let i = 0; i < 60; i++) {
     const resp = await luoguGet(`/record/${rid}`, cookies);
     const data = (await resp.json()) as any;
-    record = data.data?.record;
+    record = data.data?.record ?? data.currentData?.record;
 
     const status = record?.status;
     const score = record?.score;
-    const verdict = record?.verdict?.key ?? "?";
+    const verdict = getStatus(record).key;
 
     process.stdout.write(`\r[${i + 1}/60] Status: ${verdict} (${status}) Score: ${score ?? "-"}   `);
 
@@ -565,7 +737,7 @@ async function cmdTrack(args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const verdict = record.verdict?.key ?? "Unknown";
+  const verdict = getStatus(record).key;
   const score = record.score ?? 0;
   const time = record.time ?? "-";
   const memory = record.memory ?? "-";
@@ -575,8 +747,8 @@ async function cmdTrack(args: string[]): Promise<void> {
   console.log(`Time: ${time}ms`);
   console.log(`Memory: ${memory}KB`);
 
-  if (verdict === "WA" || verdict === "TLE" || verdict === "RE") {
-    console.log(`\nDownload testcase: lg-judge download ${rid}`);
+  if (["WA", "TLE", "RE", "MLE", "CE"].includes(verdict)) {
+    console.log(`\nDownload testcase: lg-judge download ${rid} <pid>`);
   }
 }
 
@@ -585,54 +757,95 @@ async function cmdTrack(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function cmdDownload(args: string[]): Promise<void> {
-  if (args.length < 1) {
-    console.error("Usage: lg-judge download <rid> [output_dir]");
+  if (args.length < 2) {
+    console.error("Usage: lg-judge download <rid> <pid> [output_dir]");
     process.exit(2);
   }
 
   const rid = args[0];
+  const pid = args[1];
+  const outputDir = args[2] ?? `luogu/testcases/${pid}`;
   const cookies = ensureCookies();
 
-  const queryResp = await luoguGet(`/fe/api/record/queryDownloadableTestcase/${rid}`, cookies);
-  const queryData = (await queryResp.json()) as any;
-  const testcaseId = queryData.data?.testcaseId ?? queryData.testcaseId;
+  const result = await downloadTestcase(rid, pid, cookies, outputDir);
 
-  if (!testcaseId) {
-    console.error("No downloadable testcase available (maybe AC or not finished?)");
-    process.exit(2);
-  }
-
-  const csrfToken = await getCsrfToken("P1001", cookies);
-  const dlResp = await luoguPost(
-    `/fe/api/record/downloadTestcase/${rid}`,
-    cookies,
-    { testcaseId },
-    csrfToken,
-  );
-  const dlData = (await dlResp.json()) as any;
-
-  if (dlData.data) {
-    const outputDir = args[1] ?? ".";
-    mkdirSync(outputDir, { recursive: true });
-
-    const inPath = join(outputDir, `${rid}.in`);
-    const outPath = join(outputDir, `${rid}.out`);
-
-    writeFileSync(inPath, dlData.data.input);
-    writeFileSync(outPath, dlData.data.output);
-
-    console.log(`Downloaded testcase ${testcaseId}:`);
-    console.log(`  Input:  ${inPath}`);
-    console.log(`  Output: ${outPath}`);
+  if (result) {
+    console.log(`Downloaded testcase:`);
+    console.log(`  Input:  ${result.inPath}`);
+    console.log(`  Output: ${result.outPath}`);
   } else {
-    console.error(`Download failed: ${JSON.stringify(dlData)}`);
+    console.error("No downloadable testcase available (maybe AC or not finished?)");
     process.exit(2);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Subcommand: config (save cookies)
+// Subcommand: auto (submit → track → download WA → local judge)
 // ---------------------------------------------------------------------------
+
+async function cmdAuto(args: string[]): Promise<void> {
+  if (args.length < 2) {
+    console.error("Usage: lg-judge auto <solution> <pid>");
+    process.exit(2);
+  }
+
+  const solution = args[0];
+  const pid = args[1];
+  const cookies = ensureCookies();
+
+  // Step 1: Submit
+  const code = readFileSync(solution, "utf-8");
+
+  let rid: number;
+  try {
+    rid = await submitWithCaptcha(pid, code, cookies);
+    console.log(`Submitted! Record ID: ${rid}`);
+  } catch (e) {
+    console.error(`Submit failed: ${e.message}`);
+    process.exit(2);
+  }
+
+  // Step 2: Track until finished
+  console.log("Waiting for result...");
+  const record = await trackRecord(rid, cookies);
+
+  if (!record) {
+    console.error("Failed to fetch record");
+    process.exit(2);
+  }
+
+  const verdict = getStatus(record).key;
+  const score = record.score ?? 0;
+  const time = record.time ?? "-";
+  const memory = record.memory ?? "-";
+
+  console.log(`\nVerdict: ${verdict}`);
+  console.log(`Score: ${score}`);
+  console.log(`Time: ${time}ms`);
+  console.log(`Memory: ${memory}KB`);
+
+  // Step 3: If WA/TLE/RE, download and re-judge
+  if (["WA", "TLE", "RE", "MLE", "CE"].includes(verdict)) {
+    const outputDir = join(parse(solution).dir, "testcases", pid);
+    const result = await downloadTestcase(rid, pid, cookies, outputDir);
+
+    if (result) {
+      console.log(`\nDownloaded WA testcase:`);
+      console.log(`  Input:  ${result.inPath}`);
+      console.log(`  Output: ${result.outPath}`);
+
+      // Step 4: Re-run local judge
+      console.log("\n--- Local Judge (with WA testcase) ---");
+      await cmdRun([solution, outputDir]);
+    } else {
+      console.log("\nNo downloadable testcase available for this submission.");
+    }
+  } else if (verdict === "AC") {
+    console.log("\nAccepted! No need to download testcases.");
+  } else {
+    console.log(`\nVerdict: ${verdict} (no automatic download)`);
+  }
+}
 
 async function cmdConfig(args: string[]): Promise<void> {
   if (args.length < 2) {
@@ -670,6 +883,9 @@ switch (subcmd) {
   case "download":
     await cmdDownload(subArgs);
     break;
+  case "auto":
+    await cmdAuto(subArgs);
+    break;
   case "config":
     await cmdConfig(subArgs);
     break;
@@ -681,7 +897,8 @@ Subcommands:
   fetch <pid> [output_dir]     Download sample testcases from Luogu
   submit <solution> <pid>      Submit solution to Luogu
   track <rid>                  Poll submission until finished
-  download <rid> [output_dir]  Download wrong testcase from finished submission
+  download <rid> <pid> [dir]   Download wrong testcase from finished submission
+  auto <solution> <pid>        Submit → track → download WA → local judge
   config <uid> <client_id>     Save Luogu cookies
 
 Examples:
@@ -689,7 +906,8 @@ Examples:
   lg-judge fetch P1001
   lg-judge submit luogu/P1001.cpp P1001
   lg-judge track 12345678
-  lg-judge download 12345678 luogu/testcases/P1001/
+  lg-judge download 12345678 P1001
+  lg-judge auto luogu/P1001.cpp P1001
 `);
     break;
 }
