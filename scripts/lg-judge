@@ -120,15 +120,21 @@ async function getCsrfToken(pid: string, cookies: LuoguCookies): Promise<string>
 // Fetch CAPTCHA image from Luogu
 
 // Luogu record status code mapping
+
+// Luogu record status code mapping (from luogu-api enum)
 const STATUS_MAP: Record<number, { key: string; name: string }> = {
   0: { key: "WAIT", name: "等待中" },
   1: { key: "JUDGE", name: "评测中" },
   2: { key: "CE", name: "编译错误" },
-  3: { key: "RE", name: "运行时错误" },
-  4: { key: "TLE", name: "时间超限" },
-  5: { key: "MLE", name: "空间超限" },
+  3: { key: "OLE", name: "输出超限" },
+  4: { key: "MLE", name: "空间超限" },
+  5: { key: "TLE", name: "时间超限" },
   6: { key: "WA", name: "答案错误" },
-  7: { key: "AC", name: "正确" },
+  7: { key: "RE", name: "运行时错误" },
+  8: { key: "UKE", name: "未知错误" },
+  9: { key: "HACK_OK", name: "Hack 成功" },
+  10: { key: "HACK_FAIL", name: "Hack 失败" },
+  11: { key: "UNACCEPTED", name: "未通过" },
   12: { key: "AC", name: "正确" },
 };
 
@@ -139,6 +145,42 @@ function getStatus(record: any): { key: string; name: string } {
   }
   return { key: "UNKNOWN", name: "未知" };
 }
+
+// Luogu language ID mapping (from vscode-luogu shared.ts)
+const LANG_MAP: Record<string, number> = {
+  "cpp": 28,   // C++14 (GCC 9) with O2 (default)
+  "cc": 28,
+  "cxx": 28,
+  "c": 2,      // C with O2 (default)
+  "py": 25,    // PyPy 3 (default)
+  "pypy": 25,
+  "java": 33,  // Java 21 (default)
+  "js": 9,     // Node.js LTS
+  "rb": 13,    // Ruby
+  "go": 14,    // Go
+  "rs": 15,    // Rust with O2 (default)
+  "php": 16,   // PHP
+  "cs": 17,    // C# Mono
+  "hs": 19,    // Haskell with O2 (default)
+  "kt": 21,    // Kotlin/JVM
+  "scala": 22, // Scala
+  "pl": 23,    // Perl
+  "ml": 30,    // OCaml with O2 (default)
+  "jl": 31,    // Julia
+  "lua": 32,   // Lua
+};
+
+function getLangId(filePath: string): number {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const id = LANG_MAP[ext];
+  if (id === undefined) {
+    console.error(`不支持的语言: .${ext}`);
+    console.error(`支持的语言: ${Object.keys(LANG_MAP).join(", ")}`);
+    process.exit(2);
+  }
+  return id;
+}
+
 
 // ---------------------------------------------------------------------------
 
@@ -180,6 +222,8 @@ function prompt(question: string): Promise<string> {
 async function submitWithCaptcha(
   pid: string,
   code: string,
+  lang: number = 0,
+  enableO2: boolean = false,
   cookies: LuoguCookies,
 ): Promise<number> {
   let csrfToken = await getCsrfToken(pid, cookies);
@@ -189,7 +233,7 @@ async function submitWithCaptcha(
     const resp = await luoguPost(
       `/fe/api/problem/submit/${pid}`,
       cookies,
-      { code, captcha: captchaSolution },
+      { code, lang, enableO2: +enableO2, captcha: captchaSolution },
       csrfToken,
     );
     const data = (await resp.json()) as any;
@@ -690,7 +734,8 @@ async function cmdSubmit(args: string[]): Promise<void> {
   const code = readFileSync(solution, "utf-8");
 
   try {
-    const rid = await submitWithCaptcha(pid, code, cookies);
+    const lang = getLangId(solution);
+    const rid = await submitWithCaptcha(pid, code, lang, true, cookies);
     console.log(`Submitted! Record ID: ${rid}`);
     console.log(`Track with: lg-judge track ${rid}`);
   } catch (e) {
@@ -798,7 +843,8 @@ async function cmdAuto(args: string[]): Promise<void> {
 
   let rid: number;
   try {
-    rid = await submitWithCaptcha(pid, code, cookies);
+    const lang = getLangId(solution);
+    rid = await submitWithCaptcha(pid, code, lang, true, cookies);
     console.log(`Submitted! Record ID: ${rid}`);
   } catch (e) {
     console.error(`Submit failed: ${e.message}`);
