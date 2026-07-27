@@ -1,0 +1,8 @@
+pid = "P1002"
+name = "[NOIP 2002 普及组] 过河卒"
+difficulty = 2
+time_limit = 1
+memory_limit = 125
+tags = [3, 12, 19, 82, 129]
+sample_count = 1
+source_url = "https://www.luogu.com.cn/problem/P1002"

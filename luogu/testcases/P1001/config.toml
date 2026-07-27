@@ -1,0 +1,8 @@
+pid = "P1001"
+name = "A+B Problem"
+difficulty = 1
+time_limit = 1
+memory_limit = 512
+tags = [1]
+sample_count = 1
+source_url = "https://www.luogu.com.cn/problem/P1001"
