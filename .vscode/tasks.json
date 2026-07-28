@@ -54,6 +54,21 @@
             }
         },
         {
+            "label": "编译当前 C 文件",
+            "type": "shell",
+            "command": "mkdir -p \"${fileDirname}/.build\" && clang -std=c17 -Wall -Wextra -Wpedantic -g -O0 \"${file}\" -o \"${fileDirname}/.build/${fileBasenameNoExtension}\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "showReuseMessage": false
+            }
+        },
+        {
             "label": "本地判题（当前文件）",
             "type": "shell",
             "command": "bun run \"${workspaceFolder}/scripts/lg-judge\" run \"${file}\"",

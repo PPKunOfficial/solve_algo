@@ -34,6 +34,18 @@
             "sourceLanguages": [
                 "cpp"
             ]
+        },
+        {
+            "name": "调试当前 C 文件",
+            "type": "lldb",
+            "request": "launch",
+            "preLaunchTask": "编译当前 C 文件",
+            "program": "${fileDirname}/.build/${fileBasenameNoExtension}",
+            "args": [],
+            "cwd": "${fileDirname}",
+            "sourceLanguages": [
+                "c"
+            ]
         }
     ]
 }

@@ -328,8 +328,9 @@ interface TestCase {
   expected: string;
 }
 
-function detectLanguage(filePath: string): "cpp" | "rust" | "python" {
+function detectLanguage(filePath: string): "c" | "cpp" | "rust" | "python" {
   const ext = parse(filePath).ext.toLowerCase();
+  if (ext === ".c") return "c";
   if (ext === ".cpp" || ext === ".cc") return "cpp";
   if (ext === ".rs") return "rust";
   if (ext === ".py") return "python";
@@ -530,11 +531,13 @@ async function cmdRun(args: string[]): Promise<void> {
   let binary: string | null = null;
   const tmpDir = `/tmp/lg-judge-${Date.now()}`;
 
-  if (lang === "cpp") {
+  if (lang === "c" || lang === "cpp") {
     binary = `${tmpDir}/${parse(solution).name}`;
     mkdirSync(tmpDir, { recursive: true });
+    const compiler = lang === "c" ? "clang" : "clang++";
+    const standard = lang === "c" ? "-std=c17" : "-std=c++20";
     const proc = Bun.spawn([
-      "clang++", "-std=c++20", "-O2", "-Wall", "-Wextra", "-Wpedantic",
+      compiler, standard, "-O2", "-Wall", "-Wextra", "-Wpedantic",
       solution, "-o", binary,
     ], { stdout: "pipe", stderr: "pipe" });
     const stderr = await new Response(proc.stderr).text();
@@ -955,6 +958,7 @@ Examples:
   lg-judge run luogu/P1001.cpp
   lg-judge fetch P1001
   lg-judge submit luogu/P1001.cpp P1001
+  lg-judge run luogu/P1002.c
   lg-judge track 12345678
   lg-judge download 12345678 P1001
   lg-judge auto luogu/P1001.cpp P1001

@@ -11,6 +11,10 @@
         "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
         "editor.formatOnSave": true
     },
+    "[c]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+        "editor.formatOnSave": true
+    },
     "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",
     "clangd.fallbackFlags": [
         "-std=c++20"
