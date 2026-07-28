@@ -11,7 +11,8 @@ int main() {
         return 0;
 
     // 标记马和可到达的八个位置
-    std::vector<std::vector<bool>> is_blocked(n + 1, std::vector<bool>(m + 1, false));
+    std::vector<std::vector<bool>> is_blocked(n + 1,
+                                              std::vector<bool>(m + 1, false));
     is_blocked[cx][cy] = 1;
 
     for (int i = 0; i < 8; i++) {
@@ -21,7 +22,8 @@ int main() {
             is_blocked[nx][ny] = 1;
     }
 
-    std::vector<std::vector<long long>> dp(n + 1, std::vector<long long>(m + 1, 0));
+    std::vector<std::vector<long long>> dp(n + 1,
+                                           std::vector<long long>(m + 1, 0));
     if (!is_blocked[0][0]) {
         dp[0][0] = 1;
     }

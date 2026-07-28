@@ -3,6 +3,8 @@ BasedOnStyle: Google
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
-ColumnLimit: 100
+# ColumnLimit: 100
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+AlignTrailingComments: true
+BreakBeforeBraces: Attach
