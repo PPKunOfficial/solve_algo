@@ -1,0 +1,8 @@
+pid = "P1003"
+name = "[NOIP 2011 提高组] 铺地毯"
+difficulty = 2
+time_limit = 1
+memory_limit = 125
+tags = [1, 28, 83, 111]
+sample_count = 2
+source_url = "https://www.luogu.com.cn/problem/P1003"
