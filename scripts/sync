@@ -1,0 +1,407 @@
+#!/usr/bin/env bun
+/**
+ * sync — 一键提交并同步当前仓库到远端。
+ *
+ * 用法：
+ *   sync                    提交全部改动，先拉取再推送
+ *   sync -m "提交信息"       使用自定义提交信息
+ *   sync --no-commit        只推送已有提交，不创建新提交
+ *   sync --dry-run          只打印将要执行的操作，不修改仓库
+ *   sync --remote upstream  指定远端（默认 origin，优先使用上游分支配置）
+ *   sync --force            跳过敏感文件 / 超大文件检查
+ *   sync -h, --help         显示帮助
+ *
+ * 行为：
+ *   1. git add -A 暂存全部改动（遵循 .gitignore）
+ *   2. 有改动时提交（默认信息：同步更新 <时间>（<n> 个文件））
+ *   3. git fetch 远端；本地落后时 rebase 到远端
+ *   4. git push；若被拒绝则自动 fetch + rebase 后重试一次
+ *   冲突时自动中止 rebase，仓库保持可用。
+ */
+
+import { existsSync, statSync } from "fs";
+import { resolve } from "path";
+
+const USAGE = `sync — 一键提交并同步当前仓库到远端
+
+用法：
+  sync                    提交全部改动，先拉取再推送
+  sync -m "提交信息"       使用自定义提交信息
+  sync --no-commit        只推送已有提交，不创建新提交
+  sync --dry-run          只打印将要执行的操作，不修改仓库
+  sync --remote upstream  指定远端（默认 origin，优先使用上游分支配置）
+  sync --force            跳过敏感文件 / 超大文件检查
+  sync -h, --help         显示帮助
+
+行为：
+  1. git add -A 暂存全部改动（遵循 .gitignore）
+  2. 有改动时提交（默认信息：同步更新 <时间>（<n> 个文件））
+  3. git fetch 远端；本地落后时 rebase 到远端
+  4. git push；若被拒绝则自动 fetch + rebase 后重试一次
+  冲突时自动中止 rebase，仓库保持可用。`;
+
+const BIG_FILE_LIMIT = 100 * 1024 * 1024;
+const WARN_FILE_LIMIT = 50 * 1024 * 1024;
+const SECRET_RE =
+  /(^\.env$|^\.env\.|\.(pem|key|p12|pfx|keystore)$|^id_(rsa|ed25519|ecdsa)$|^\.netrc$|^\.npmrc$)/;
+
+interface Options {
+  message?: string;
+  remote: string;
+  dryRun: boolean;
+  commit: boolean;
+  force: boolean;
+  help: boolean;
+}
+
+interface Repository {
+  root: string;
+  branch: string;
+  remote: string;
+  remoteBranch: string;
+  upstreamRef: string;
+  hasUpstream: boolean;
+}
+
+function fail(message: string, code = 1): never {
+  console.error(`\n✗ ${message}`);
+  process.exit(code);
+}
+
+function parseArgs(argv: string[]): Options {
+  const options: Options = {
+    remote: "origin",
+    dryRun: false,
+    commit: true,
+    force: false,
+    help: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    switch (arg) {
+      case "-m":
+      case "--message":
+        options.message = argv[++i] ?? fail("--message 需要一个值", 2);
+        break;
+      case "--remote":
+        options.remote = argv[++i] ?? fail("--remote 需要一个值", 2);
+        break;
+      case "--no-commit":
+        options.commit = false;
+        break;
+      case "--dry-run":
+        options.dryRun = true;
+        break;
+      case "--force":
+        options.force = true;
+        break;
+      case "-h":
+      case "--help":
+        options.help = true;
+        break;
+      default:
+        fail(`未知参数：${arg}（使用 --help 查看用法）`, 2);
+    }
+  }
+  return options;
+}
+
+function tryGit(args: string[], cwd: string): string | null {
+  const result = Bun.spawnSync(["git", ...args], { cwd });
+  return result.exitCode === 0 ? result.stdout.toString() : null;
+}
+
+function git(args: string[], cwd: string): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd });
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.toString().trim();
+    fail(`git ${args.join(" ")} 执行失败${stderr ? `：\n${stderr}` : ""}`);
+  }
+  return result.stdout.toString();
+}
+
+function repositoryRoot(cwd: string): string {
+  const root = tryGit(["rev-parse", "--show-toplevel"], cwd);
+  if (!root) {
+    fail("当前目录不在 Git 仓库中，或系统未安装 Git", 2);
+  }
+  return root.trim();
+}
+
+function currentBranch(root: string): string | undefined {
+  const name = tryGit(["symbolic-ref", "--quiet", "--short", "HEAD"], root);
+  return name?.trim() || undefined;
+}
+
+function guardInProgress(root: string): void {
+  for (const [name, label] of [
+    ["rebase-merge", "rebase"],
+    ["rebase-apply", "rebase"],
+  ] as const) {
+    const path = tryGit(["rev-parse", "--git-path", name], root);
+    if (path && existsSync(resolve(root, path.trim()))) {
+      fail(`检测到进行中的 ${label}，请先完成或中止后再同步`, 2);
+    }
+  }
+  if (tryGit(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], root)) {
+    fail("检测到进行中的 merge，请先完成或中止后再同步", 2);
+  }
+}
+
+function resolveRepository(options: Options, cwd: string): Repository {
+  const root = repositoryRoot(cwd);
+  const branch = currentBranch(root);
+  if (!branch) {
+    fail("当前处于 detached HEAD 状态，请先切换到分支后再同步", 2);
+  }
+  guardInProgress(root);
+
+  const configuredRemote = tryGit(["config", "--get", `branch.${branch}.remote`], root)?.trim() ?? "";
+  const configuredMerge = tryGit(["config", "--get", `branch.${branch}.merge`], root)?.trim() ?? "";
+  const hasUpstream = configuredRemote !== "" && configuredMerge !== "";
+
+  const remote = hasUpstream && configuredRemote !== "." ? configuredRemote : options.remote;
+  const remoteBranch = hasUpstream ? configuredMerge.replace(/^refs\/heads\//, "") : branch;
+
+  return {
+    root,
+    branch,
+    remote,
+    remoteBranch,
+    upstreamRef: `${remote}/${remoteBranch}`,
+    hasUpstream,
+  };
+}
+
+function fetchRemote(repository: Repository): void {
+  const result = Bun.spawnSync(["git", "fetch", "--prune", repository.remote], {
+    cwd: repository.root,
+  });
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.toString().trim();
+    fail(
+      `无法从远端 ${repository.remote} 获取更新，请检查远端地址、网络或凭据${stderr ? `：\n${stderr}` : ""}`,
+    );
+  }
+}
+
+function count(root: string, range: string): number {
+  const out = tryGit(["rev-list", "--count", range], root);
+  return out ? Number(out.trim()) || 0 : 0;
+}
+
+function commitAheadBehind(repository: Repository): { ahead: number; behind: number } {
+  const upstream = tryGit(["rev-parse", "--verify", "--quiet", repository.upstreamRef], repository.root);
+  if (!upstream) return { ahead: 0, behind: 0 };
+  return {
+    ahead: count(repository.root, `${repository.upstreamRef}..HEAD`),
+    behind: count(repository.root, `HEAD..${repository.upstreamRef}`),
+  };
+}
+
+function stagedFiles(root: string): string[] {
+  const out = tryGit(["diff", "--cached", "--name-only", "--diff-filter=ACMR"], root);
+  return out
+    ? out
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function changedFiles(root: string): string[] {
+  const out = tryGit(["status", "--porcelain", "--untracked-files=all"], root);
+  return out
+    ? out
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function checkStagedFiles(repository: Repository, files: string[], force: boolean): void {
+  const tooBig: string[] = [];
+  const huge: string[] = [];
+  const secrets: string[] = [];
+
+  for (const file of files) {
+    const absolute = resolve(repository.root, file);
+    if (SECRET_RE.test(file)) secrets.push(file);
+    let size = 0;
+    try {
+      size = statSync(absolute).size;
+    } catch {
+      continue;
+    }
+    if (size >= BIG_FILE_LIMIT) huge.push(`${file}（${formatSize(size)}）`);
+    else if (size >= WARN_FILE_LIMIT) tooBig.push(`${file}（${formatSize(size)}）`);
+  }
+
+  if (secrets.length > 0 && !force) {
+    fail(
+      `以下文件疑似包含密钥，已停止提交：\n  ${secrets.join("\n  ")}\n` +
+        `确认无误后可使用 sync --force 跳过检查。`,
+    );
+  }
+  if (huge.length > 0 && !force) {
+    fail(
+      `以下文件超过 GitHub 单文件 100 MB 限制，已停止提交：\n  ${huge.join("\n  ")}\n` +
+        `请移出仓库或使用 sync --force 强制提交。`,
+    );
+  }
+  if (tooBig.length > 0) {
+    console.warn(`⚠ 以下文件较大（>= 50 MB），推送可能较慢：\n  ${tooBig.join("\n  ")}`);
+  }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
+function timestamp(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+function defaultMessage(files: string[]): string {
+  return `同步更新 ${timestamp()}（${files.length} 个文件）`;
+}
+
+function printFileList(files: string[], limit = 15): void {
+  for (const file of files.slice(0, limit)) console.log(`  · ${file}`);
+  if (files.length > limit) console.log(`  … 另有 ${files.length - limit} 个文件`);
+}
+
+function rebaseOnto(repository: Repository, ref: string): void {
+  const result = Bun.spawnSync(["git", "rebase", ref], { cwd: repository.root });
+  if (result.exitCode !== 0) {
+    Bun.spawnSync(["git", "rebase", "--abort"], { cwd: repository.root });
+    fail(
+      `rebase 到 ${ref} 时发生冲突，已自动中止（仓库状态已恢复）。\n` +
+        `请手动解决冲突并提交后重新运行 sync。\n${result.stderr.toString().trim()}`,
+    );
+  }
+  console.log(`✓ 已 rebase 到 ${ref}`);
+}
+
+function push(repository: Repository, setUpstream: boolean): { pushed: boolean } {
+  const args = ["push", ...(setUpstream ? ["-u"] : []), repository.remote, repository.branch];
+  let result = Bun.spawnSync(["git", ...args], { cwd: repository.root });
+  let stderr = result.stderr.toString().trim();
+
+  if (result.exitCode === 0) {
+    return { pushed: stderr.length > 0 };
+  }
+
+  const rejected = /rejected|non-fast-forward|fetch first/i.test(stderr);
+  if (!rejected) {
+    fail(`推送失败：\n${stderr}`);
+  }
+
+  console.warn("⚠ 远端已有新提交，正在同步后重试推送…");
+  fetchRemote(repository);
+  rebaseOnto(repository, repository.upstreamRef);
+  result = Bun.spawnSync(["git", ...args], { cwd: repository.root });
+  stderr = result.stderr.toString().trim();
+  if (result.exitCode !== 0) {
+    fail(`rebase 后推送仍然失败：\n${stderr}`);
+  }
+  return { pushed: stderr.length > 0 };
+}
+
+function reportCommits(root: string, range: string | null): void {
+  const args = ["log", "--format=  %h %s", "--max-count=20"];
+  if (range) args.push(range);
+  const log = tryGit(args, root);
+  if (log && log.trim()) console.log(log.trimEnd());
+}
+
+function main(): void {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  const repository = resolveRepository(options, process.cwd());
+  console.log(`==> 仓库 ${repository.root}`);
+  console.log(`    分支 ${repository.branch} → ${repository.upstreamRef}`);
+
+  fetchRemote(repository);
+  const { ahead, behind } = commitAheadBehind(repository);
+
+  const dirty = changedFiles(repository.root);
+
+  if (options.dryRun) {
+    console.log("\n==> 计划（--dry-run，不会修改仓库）");
+    if (dirty.length === 0) {
+      console.log("  暂存：无改动");
+    } else {
+      console.log(`  暂存：${dirty.length} 个文件`);
+      for (const line of dirty.slice(0, 15)) console.log(`    ${line}`);
+      if (dirty.length > 15) console.log(`    … 另有 ${dirty.length - 15} 个改动`);
+      console.log(`  提交信息：${options.message ?? defaultMessage(dirty)}`);
+    }
+    console.log(
+      `  远端：${behind > 0 ? `落后 ${behind} 个提交（将 rebase）` : "无新提交"}，` +
+        `${ahead > 0 ? `领先 ${ahead} 个提交（将推送）` : "无待推送提交"}`,
+    );
+    if (dirty.length === 0 && ahead === 0) console.log("  结论：已同步，无需操作");
+    return;
+  }
+
+  // 1. 暂存并提交
+  let committed = false;
+  if (options.commit) {
+    git(["add", "-A"], repository.root);
+    const files = stagedFiles(repository.root);
+    if (files.length > 0) {
+      checkStagedFiles(repository, files, options.force);
+      const message = options.message ?? defaultMessage(files);
+      console.log(`\n==> 提交 ${files.length} 个文件`);
+      printFileList(files);
+      const result = Bun.spawnSync(["git", "commit", "-m", message], { cwd: repository.root });
+      if (result.exitCode !== 0) {
+        fail(`提交失败：\n${result.stdout.toString().trim()}\n${result.stderr.toString().trim()}`);
+      }
+      console.log(`✓ 提交信息：${message}`);
+      committed = true;
+    } else if (dirty.length > 0) {
+      fail("暂存后没有可提交的改动（可能都已被忽略）", 2);
+    }
+  }
+
+  // 2. 落后则 rebase
+  const { ahead: aheadAfterCommit, behind: behindAfterCommit } = commitAheadBehind(repository);
+  if (behindAfterCommit > 0) {
+    console.log(`\n==> 远端领先 ${behindAfterCommit} 个提交，rebase 到 ${repository.upstreamRef}`);
+    rebaseOnto(repository, repository.upstreamRef);
+  }
+
+  const aheadNow = count(repository.root, `${repository.upstreamRef}..HEAD`);
+  if (aheadNow === 0) {
+    console.log("\n✓ 已是最新，无需推送");
+    return;
+  }
+
+  // 3. 推送
+  const before = tryGit(["rev-parse", "--short", repository.upstreamRef], repository.root)?.trim() ?? "";
+  const beforeFull = tryGit(["rev-parse", repository.upstreamRef], repository.root)?.trim() ?? "";
+  console.log(`\n==> 推送 ${aheadNow} 个提交到 ${repository.upstreamRef}`);
+  push(repository, !repository.hasUpstream);
+
+  const after = git(["rev-parse", "--short", "HEAD"], repository.root).trim();
+  console.log(`\n✓ 同步完成 ${repository.upstreamRef}: ${before || "(新建)"} → ${after}`);
+  reportCommits(repository.root, beforeFull ? `${beforeFull}..HEAD` : null);
+
+  const localHead = git(["rev-parse", "HEAD"], repository.root).trim();
+  const remoteHead = tryGit(["rev-parse", "--verify", "--quiet", repository.upstreamRef], repository.root)?.trim();
+  if (remoteHead !== localHead) {
+    console.warn(`⚠ 本地 HEAD 与 ${repository.upstreamRef} 不一致，请检查远端是否被其他提交更新`);
+  }
+}
+
+main();
