@@ -72,7 +72,7 @@ class Sink:
 
     def __init__(self):
         self.count = 0
-        self._hash = hashlib.sha1()
+        self.chunks = []
         self.buffer = self
 
     def write(self, chunk):
@@ -81,7 +81,7 @@ class Sink:
         else:
             chunk = bytes(chunk)
         self.count += len(chunk)
-        self._hash.update(chunk)
+        self.chunks.append(chunk)
         return len(chunk)
 
     def writelines(self, lines):
@@ -97,8 +97,11 @@ class Sink:
     def fileno(self):
         raise io.UnsupportedOperation("fileno")
 
-    def hexdigest(self):
-        return self._hash.hexdigest()
+    def digest(self):
+        hasher = hashlib.sha1()
+        for chunk in self.chunks:
+            hasher.update(chunk)
+        return hasher.hexdigest()
 
 
 result = {"times": [], "outputs": [], "error": None}
@@ -138,7 +141,8 @@ for i in range(warmup + runs):
         break
     if i >= warmup:
         result["times"].append(t1 - t0)
-        result["outputs"].append([sink.count, sink.hexdigest()])
+        # Hashing happens after t1 so output volume does not inflate the time.
+        result["outputs"].append([sink.count, sink.digest()])
 
 print(json.dumps(result), file=real_stdout)
 """
