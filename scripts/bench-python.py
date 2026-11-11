@@ -14,6 +14,8 @@ Interpreters are resolved with `uv python find`, so anything installed via
 Solutions that read stdin are fed --input.  Without it, the largest *.in in a
 sibling testcases/<stem>/ directory is used (the luogu/ layout), otherwise they
 run with an empty stdin and usually fail -- which is reported, not hidden.
+Large deterministic inputs for several luogu solutions can be generated with
+scripts/gen-bench-inputs.py.
 
 Examples:
   python3 scripts/bench-python.py luogu/P2367.py --input big.in
