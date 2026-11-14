@@ -25,7 +25,6 @@ def main():
         ans += 1
 
     print(ans)
-    return
 
 
 if __name__ == "__main__":
